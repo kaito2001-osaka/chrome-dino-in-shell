@@ -148,6 +148,25 @@ Game::Game(unsigned int seed) : rng(seed) {
     GetTerminalSize(term_w, term_h);
     ApplyTerminalSize(term_w, term_h);
 
+    // State that outlives a restart
+    best_score = 0;
+    quit = false;
+    input_closed = false;
+    paused_too_small = false;
+
+    Reset();
+}
+
+// Start a fresh run. Deliberately leaves the terminal geometry and the random
+// number generator alone, so restarting keeps its seed and never has to tear
+// down and re-enter raw mode.
+void Game::Reset() {
+    dino_x = 5;
+    dino_y = ground_y - DINO_H;
+    dino_y_float = dino_y;
+    y_velocity = 0;
+    is_on_ground = true;
+
     // Initial obstacle placement. Place only one at the right edge of the screen,
     // and always keep at least the minimum gap before the next one spawns
     // (do not set spawn_gap to 0). The gap is randomized per run and per spawn.
@@ -157,9 +176,7 @@ Game::Game(unsigned int seed) : rng(seed) {
 
     score = 0;
     game_over = false;
-    quit = false;
-    input_closed = false;
-    paused_too_small = false;
+    input_freeze = 0;
     frame_delay = 40000; // Initial per-frame wait (40 ms)
 }
 
@@ -240,6 +257,19 @@ void Game::HandleInput() {
             if (errno == EINTR) continue; // Interrupted by a signal; try again
             input_closed = true;
             return;
+        }
+
+        if (game_over) {
+            // Keys pressed in the moments around the collision are read and
+            // thrown away, so a jump buffered just before impact cannot dismiss
+            // the panel before the player has looked at it.
+            if (input_freeze > 0) continue;
+            if (ch == 'r') {
+                Reset();
+            } else if (ch == 'q') {
+                quit = true;
+            }
+            continue;
         }
 
         if ((ch == ' ' || ch == 'w') && is_on_ground) {
@@ -344,6 +374,53 @@ void Game::CheckCollision() {
     }
 }
 
+// Write `text` into the buffer at (y, x), clipped to the buffer's bounds.
+static void Stamp(std::vector<std::string>& screen, int y, int x,
+                  const std::string& text) {
+    if (y < 0 || y >= static_cast<int>(screen.size())) return;
+    for (size_t i = 0; i < text.size(); ++i) {
+        const int px = x + static_cast<int>(i);
+        if (px < 0 || px >= static_cast<int>(screen[y].size())) continue;
+        screen[y][px] = text[i];
+    }
+}
+
+// Draw the game-over box centred on top of whatever the last frame contained,
+// so the player can still see the collision that ended the run.
+void Game::DrawGameOverPanel(std::vector<std::string>& screen) const {
+    std::vector<std::string> lines;
+    lines.push_back("GAME OVER");
+    lines.push_back("SCORE " + std::to_string(score) +
+                    "    BEST " + std::to_string(best_score));
+    lines.push_back("[r] Restart   [q] Quit");
+
+    size_t widest = 0;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].size() > widest) widest = lines[i].size();
+    }
+
+    int inner = static_cast<int>(widest) + 4; // padding either side of the text
+    if (inner > screen_width - 2) inner = screen_width - 2;
+    const int box_w = inner + 2;              // plus the two side borders
+    const int box_h = static_cast<int>(lines.size()) + 2;
+    if (inner < 1 || box_w > screen_width || box_h > screen_height) return;
+
+    const int x0 = (screen_width - box_w) / 2;
+    const int y0 = (screen_height - box_h) / 2;
+    const std::string border = "+" + std::string(inner, '-') + "+";
+    const std::string blank = "|" + std::string(inner, ' ') + "|";
+
+    Stamp(screen, y0, x0, border);
+    for (int i = 0; i < static_cast<int>(lines.size()); ++i) {
+        std::string text = lines[i];
+        if (static_cast<int>(text.size()) > inner) text = text.substr(0, inner);
+        const int pad = (inner - static_cast<int>(text.size())) / 2;
+        Stamp(screen, y0 + 1 + i, x0, blank);
+        Stamp(screen, y0 + 1 + i, x0 + 1 + pad, text);
+    }
+    Stamp(screen, y0 + box_h - 1, x0, border);
+}
+
 // --- 4 & 5. Build the draw buffer and flush it to the screen at once ---
 void Game::Render() {
     std::vector<std::string> screen(screen_height, std::string(screen_width, ' '));
@@ -384,15 +461,21 @@ void Game::Render() {
         }
     }
 
+    if (game_over) DrawGameOverPanel(screen);
+
     // \033[H is the escape sequence that moves the cursor to the top-left (0,0) (prevents flicker)
     std::string output = "\033[H";
     for (int y = 0; y < screen_height; ++y) {
         output += screen[y];
         if (y < screen_height - 1) output += "\n";
     }
-    // Show the score and the controls on the bottom row
+    // Put the status line on the reserved bottom row explicitly and clear it.
+    // A restart takes the score back to 0, and without the erase the old, longer
+    // number would leave stale digits behind.
+    output += "\033[" + std::to_string(screen_height + 1) + ";1H\033[K";
     output += "\033[7m SCORE: " + std::to_string(score) +
-              "   [SPACE/w] Jump   [q] Quit \033[0m";
+              (game_over ? "   [r] Restart   [q] Quit "
+                         : "   [SPACE/w] Jump   [q] Quit ") + "\033[0m";
     std::cout << output << std::flush;
 }
 
@@ -446,8 +529,9 @@ int Game::Run() {
     // Move to the alternate screen buffer and hide the cursor
     EnterGameScreen();
 
-    // Game loop
-    while (!game_over && !quit && !g_interrupted) {
+    // Game loop. A collision no longer ends it: the run stops on the game-over
+    // panel, which offers a restart, and only q or a signal leaves.
+    while (!quit && !g_interrupted) {
         if (g_suspend_requested) {
             g_suspend_requested = 0;
             SuspendToShell();
@@ -471,9 +555,16 @@ int Game::Run() {
         if (paused_too_small) {
             // Hold the run rather than draw a field that does not fit
             RenderTooSmall();
+        } else if (game_over) {
+            if (input_freeze > 0) --input_freeze;
+            Render(); // Keep the final frame and its panel on screen
         } else {
             Update();
             CheckCollision();
+            if (game_over) {
+                if (score > best_score) best_score = score;
+                input_freeze = GAME_OVER_FREEZE_US / frame_delay;
+            }
             Render();
         }
         usleep(frame_delay);

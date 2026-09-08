@@ -26,6 +26,11 @@ const int CACTUS_H = 4;
 const int JUMP_AIR_FRAMES = 22;
 const int JUMP_CLEARANCE = 3;
 
+// How long the game-over panel ignores input, in microseconds. Long enough that
+// a jump keypress buffered just before the collision cannot dismiss the panel
+// before the player has seen it.
+const int GAME_OVER_FREEZE_US = 400000;
+
 // Smallest terminal the game supports. Below this the play field cannot hold
 // the ground, the dinosaur and a jumpable cactus, so the game refuses to start.
 const int MIN_TERM_WIDTH = 40;
@@ -60,12 +65,15 @@ private:
     void Update();
     void CheckCollision();
     void Render();
+    void Reset();       // Start a fresh run without re-entering raw mode
     void SpawnObstacle();
     int MinGap() const; // Minimum gap (in columns) always kept between obstacles
     int RandomGap();    // MinGap() plus a random extra, in columns
     // Re-derive every geometry-dependent value from a terminal size
     void ApplyTerminalSize(int term_w, int term_h);
     void RenderTooSmall() const; // Shown while the window is below the minimum
+    // Overlay the game-over box on top of the retained final frame
+    void DrawGameOverPanel(std::vector<std::string>& screen) const;
     void SuspendToShell(); // Ctrl+Z: hand the terminal back, stop, then resume
     void Cleanup();
 
@@ -90,7 +98,9 @@ private:
     int spawn_gap; // Remaining distance until the next obstacle
 
     long score;
+    long best_score;   // Best of this session; persisting it is a separate issue
     bool game_over;
+    int input_freeze;  // Frames left before the game-over panel accepts input
     bool quit;          // Whether the user aborted with q
     bool input_closed;  // Whether stdin has reached EOF (nothing more to read)
     bool paused_too_small; // Whether the window shrank below the minimum size

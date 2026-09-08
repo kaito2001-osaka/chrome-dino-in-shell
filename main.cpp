@@ -52,7 +52,9 @@ int main(int argc, char* argv[]) {
     int score = game.Run();
     if (score < 0) return 1; // The game could not start; it already said why
 
-    // After the game ends, print the final score on the normal command line
-    std::cout << "Game Over!  Final Score: " << score << std::endl;
+    // The collision itself is now shown in-game on the game-over panel, so this
+    // is just a parting summary. Neutral wording, because reaching here means
+    // the player chose to quit. (Reporting the outcome properly is issue #12.)
+    std::cout << "Final score: " << score << std::endl;
     return 0;
 }
