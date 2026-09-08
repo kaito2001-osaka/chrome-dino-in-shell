@@ -3,6 +3,7 @@
 #ifndef DINO_GAME_H
 #define DINO_GAME_H
 
+#include <random>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,15 @@ const int DINO_H = 4;
 extern const std::string CACTUS_AA[];
 const int CACTUS_W = 5;
 const int CACTUS_H = 4;
+
+// Jump shape. The arc is derived from the play field rather than hardcoded, so
+// the dinosaur never leaves the top of a short terminal: it rises just far
+// enough to clear a cactus (CACTUS_H + JUMP_CLEARANCE rows), capped by the
+// headroom available, and the air time is held constant so a jump feels the
+// same at every terminal size. For an apex A over JUMP_AIR_FRAMES frames the
+// initial velocity is -4A/T and the per-frame gravity is 8A/T^2.
+const int JUMP_AIR_FRAMES = 22;
+const int JUMP_CLEARANCE = 3;
 
 // Smallest terminal the game supports. Below this the play field cannot hold
 // the ground, the dinosaur and a jumpable cactus, so the game refuses to start.
@@ -39,7 +49,8 @@ bool CheckTerminalEnvironment(std::string& error);
 // --- Game core ---
 class Game {
 public:
-    Game();
+    Game();                           // Layout seeded unpredictably
+    explicit Game(unsigned int seed); // Layout reproducible from a seed
 
     // Run the game (init, loop, and cleanup). Returns the final score.
     int Run();
@@ -51,6 +62,7 @@ private:
     void Render();
     void SpawnObstacle();
     int MinGap() const; // Minimum gap (in columns) always kept between obstacles
+    int RandomGap();    // MinGap() plus a random extra, in columns
     // Re-derive every geometry-dependent value from a terminal size
     void ApplyTerminalSize(int term_w, int term_h);
     void RenderTooSmall() const; // Shown while the window is below the minimum
@@ -67,7 +79,11 @@ private:
     int dino_y;
     double dino_y_float;
     double y_velocity;
+    double jump_velocity; // Upward velocity of a jump, derived from the field
+    double gravity;       // Downward acceleration per frame, likewise derived
     bool is_on_ground;
+
+    std::mt19937 rng; // Obstacle spacing; seeded per run, or from --seed
 
     // List of obstacle (cactus) x coordinates
     std::vector<int> obstacles;

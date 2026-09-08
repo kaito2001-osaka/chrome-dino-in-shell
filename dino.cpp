@@ -4,8 +4,6 @@
 
 #include <iostream>
 #include <string>
-#include <cstdlib>
-#include <ctime>
 #include <cerrno>       // for errno on a failed read()
 #include <csignal>
 #include <unistd.h>     // for usleep and read
@@ -131,10 +129,11 @@ static void HandleWinch(int) {
     g_resized = 1;
 }
 
-Game::Game() {
-    // Initialize the random number generator
-    std::srand(static_cast<unsigned int>(std::time(nullptr)));
+// std::time has one-second resolution, so two runs started inside the same
+// second used to produce an identical layout. std::random_device does not.
+Game::Game() : Game(std::random_device{}()) {}
 
+Game::Game(unsigned int seed) : rng(seed) {
     // Initial state of the player (dinosaur). Set before the geometry, because
     // ApplyTerminalSize() places the dinosaur on the ground it derives.
     dino_x = 5;
@@ -154,7 +153,7 @@ Game::Game() {
     // (do not set spawn_gap to 0). The gap is randomized per run and per spawn.
     obstacles.clear();
     obstacles.push_back(screen_width - 1);
-    spawn_gap = MinGap() + std::rand() % (screen_width / 3 + 1);
+    spawn_gap = RandomGap();
 
     score = 0;
     game_over = false;
@@ -185,6 +184,18 @@ void Game::ApplyTerminalSize(int term_w, int term_h) {
         is_on_ground = true;
         y_velocity = 0;
     }
+
+    // Size the jump to the field. The apex is whatever clears a cactus, capped
+    // by the headroom above the dinosaur's resting position so it can never be
+    // thrown off the top of a short terminal. At the supported minimum height
+    // the headroom is 5 rows, which is enough; the lower clamp only keeps the
+    // arithmetic sane if the geometry is ever smaller than that.
+    int apex = CACTUS_H + JUMP_CLEARANCE;
+    const int headroom = ground_y - DINO_H;
+    if (apex > headroom) apex = headroom;
+    if (apex < 1) apex = 1;
+    jump_velocity = -4.0 * apex / JUMP_AIR_FRAMES;
+    gravity = 8.0 * apex / (JUMP_AIR_FRAMES * JUMP_AIR_FRAMES);
 
     // Drop obstacles that a narrower field can no longer hold
     for (size_t i = obstacles.size(); i-- > 0;) {
@@ -232,9 +243,9 @@ void Game::HandleInput() {
         }
 
         if ((ch == ' ' || ch == 'w') && is_on_ground) {
-            // Jump with space / w (upward initial velocity).
-            // Provides enough height and air time to clear a cactus comfortably.
-            y_velocity = -2.0;
+            // Jump with space / w. The velocity was derived from the play field
+            // in ApplyTerminalSize(), so the arc fits whatever terminal this is.
+            y_velocity = jump_velocity;
             is_on_ground = false;
         } else if (ch == 'q') {
             quit = true;
@@ -250,19 +261,25 @@ int Game::MinGap() const {
     return DINO_W + CACTUS_W + 16;
 }
 
+// The gap to the next obstacle: the minimum plus a random extra amount. Since
+// spawn_gap is in frames (roughly equal to columns), the gap never falls below
+// MinGap(), which prevents obstacles from being placed too close together.
+// uniform_int_distribution rather than rand() % n, which is biased.
+int Game::RandomGap() {
+    std::uniform_int_distribution<int> extra(0, screen_width / 3);
+    return MinGap() + extra(rng);
+}
+
 // Spawn a new obstacle at the right edge of the screen
 void Game::SpawnObstacle() {
     obstacles.push_back(screen_width - 1);
-    // The gap to the next obstacle is "minimum gap + a random extra amount".
-    // Since spawn_gap is in frames (roughly equal to columns), the gap never
-    // falls below MinGap(), which prevents obstacles from being placed too close.
-    spawn_gap = MinGap() + std::rand() % (screen_width / 3 + 1);
+    spawn_gap = RandomGap();
 }
 
 // --- 2. Physics and update ---
 void Game::Update() {
     if (!is_on_ground) {
-        y_velocity += 0.16; // Gravity
+        y_velocity += gravity;
         dino_y_float += y_velocity;
         dino_y = static_cast<int>(dino_y_float);
 
