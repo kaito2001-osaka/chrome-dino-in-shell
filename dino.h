@@ -16,13 +16,25 @@ extern const std::string CACTUS_AA[];
 const int CACTUS_W = 5;
 const int CACTUS_H = 4;
 
+// Smallest terminal the game supports. Below this the play field cannot hold
+// the ground, the dinosaur and a jumpable cactus, so the game refuses to start.
+const int MIN_TERM_WIDTH = 40;
+const int MIN_TERM_HEIGHT = 12;
+
 // --- Terminal control ---
-// Put keyboard input into non-blocking (immediately detectable) mode on Linux
-void SetTerminalMode(bool raw);
+// Put keyboard input into non-blocking (immediately detectable) mode on Linux.
+// Returns false if the terminal settings could not be read or applied.
+bool SetTerminalMode(bool raw);
 // Equivalent of Windows' _kbhit() (check whether a key has been pressed)
 bool IsKeyPressed();
-// Get the terminal size (columns and rows). Falls back to defaults if unavailable.
-void GetTerminalSize(int& width, int& height);
+// Get the terminal size (columns and rows). Returns false when stdout is not a
+// terminal, which is the only reason the size cannot be determined.
+bool GetTerminalSize(int& width, int& height);
+// Check that the game can actually run here: stdin and stdout are terminals and
+// the window is at least MIN_TERM_WIDTH x MIN_TERM_HEIGHT. On failure, fills
+// `error` with a message for the user and returns false. Must be called before
+// constructing Game, which derives its geometry from the terminal size.
+bool CheckTerminalEnvironment(std::string& error);
 
 // --- Game core ---
 class Game {
@@ -59,8 +71,9 @@ private:
 
     long score;
     bool game_over;
-    bool quit;        // Whether the user aborted with q
-    int frame_delay;  // Wait time per frame (microseconds); smaller is faster
+    bool quit;          // Whether the user aborted with q
+    bool input_closed;  // Whether stdin has reached EOF (nothing more to read)
+    int frame_delay;    // Wait time per frame (microseconds); smaller is faster
 };
 
 #endif // DINO_GAME_H
