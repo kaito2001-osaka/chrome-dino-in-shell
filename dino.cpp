@@ -29,8 +29,12 @@ const std::string CACTUS_AA[] = {
     "  |  "
 };
 
-// Flag to make sure terminal settings are restored even on SIGINT (Ctrl+C) etc.
+// Set by SIGINT (Ctrl+C), SIGTERM and SIGHUP: unwind the loop through Cleanup()
+// so the terminal is always restored, whichever of them arrives.
 static volatile sig_atomic_t g_interrupted = 0;
+// Set by SIGTSTP (Ctrl+Z). Handled at the top of the game loop rather than in
+// the handler itself, because restoring the screen is not async-signal-safe.
+static volatile sig_atomic_t g_suspend_requested = 0;
 
 // --- Function to make keyboard input non-blocking (immediately detectable) on Linux ---
 bool SetTerminalMode(bool raw) {
@@ -95,9 +99,29 @@ bool CheckTerminalEnvironment(std::string& error) {
     return true;
 }
 
-// SIGINT handler: just raises a flag to break out of the loop
-static void HandleSigint(int) {
+// Switch to the alternate screen buffer (what vim, less and htop use) and hide
+// the cursor. The terminal keeps the user's previous screen and restores it on
+// the way out, so nothing they were looking at is destroyed.
+static void EnterGameScreen() {
+    std::cout << "\033[?1049h\033[H\033[?25l" << std::flush;
+}
+
+// Show the cursor again and leave the alternate screen buffer. No erase is
+// needed: leaving the buffer is what brings the user's screen back.
+static void LeaveGameScreen() {
+    std::cout << "\033[?25h\033[?1049l" << std::flush;
+}
+
+// SIGINT / SIGTERM / SIGHUP handler: raise a flag to break out of the loop, so
+// every one of them leaves through Cleanup() with the terminal restored.
+static void HandleTerminate(int) {
     g_interrupted = 1;
+}
+
+// SIGTSTP handler: only record the request. The actual suspend happens at the
+// top of the game loop, where it is safe to write to the terminal.
+static void HandleTstp(int) {
+    g_suspend_requested = 1;
 }
 
 Game::Game() {
@@ -300,16 +324,44 @@ void Game::Render() {
     std::cout << output << std::flush;
 }
 
-// Restore the terminal state, clean up the screen, and return to the prompt
+// Restore the terminal state and return to the prompt with the user's screen
+// exactly as they left it.
 void Game::Cleanup() {
+    LeaveGameScreen();
     SetTerminalMode(false);
-    // Clear the whole screen, move the cursor back to the top-left, and show the cursor again
-    std::cout << "\033[2J\033[H\033[?25h" << std::flush;
+    // Keys pressed during Update/Render/sleep are still queued and would be
+    // echoed at the shell prompt. Drop them.
+    tcflush(STDIN_FILENO, TCIFLUSH);
+}
+
+// Ctrl+Z. Put the terminal back the way the shell expects it, stop for real by
+// re-raising with the default disposition, then restore the game state on the
+// way back in. Doing this here rather than in the handler keeps every terminal
+// write out of async-signal-unsafe territory.
+void Game::SuspendToShell() {
+    LeaveGameScreen();
+    SetTerminalMode(false);
+    tcflush(STDIN_FILENO, TCIFLUSH);
+
+    std::signal(SIGTSTP, SIG_DFL);
+    std::raise(SIGTSTP);
+    // --- stopped here; execution resumes when the shell sends SIGCONT ---
+    std::signal(SIGTSTP, HandleTstp);
+
+    if (!SetTerminalMode(true)) {
+        // The terminal is no longer usable; end the run rather than play blind.
+        g_interrupted = 1;
+        return;
+    }
+    EnterGameScreen();
 }
 
 int Game::Run() {
-    // Catch Ctrl+C so the terminal settings can be restored
-    std::signal(SIGINT, HandleSigint);
+    // Catch every signal that would otherwise leave the terminal in raw mode
+    std::signal(SIGINT, HandleTerminate);   // Ctrl+C
+    std::signal(SIGTERM, HandleTerminate);  // kill
+    std::signal(SIGHUP, HandleTerminate);   // terminal window closed
+    std::signal(SIGTSTP, HandleTstp);       // Ctrl+Z
 
     // Configure the terminal for the game
     if (!SetTerminalMode(true)) {
@@ -317,11 +369,16 @@ int Game::Run() {
         return -1;
     }
 
-    // Escape sequence that clears the screen once and hides the cursor
-    std::cout << "\033[2J\033[?25l" << std::flush;
+    // Move to the alternate screen buffer and hide the cursor
+    EnterGameScreen();
 
     // Game loop
     while (!game_over && !quit && !g_interrupted) {
+        if (g_suspend_requested) {
+            g_suspend_requested = 0;
+            SuspendToShell();
+            if (g_interrupted) break;
+        }
         HandleInput();
         Update();
         CheckCollision();
