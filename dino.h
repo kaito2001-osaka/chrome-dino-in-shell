@@ -51,6 +51,7 @@ private:
     void Render();
     void SpawnObstacle();
     int MinGap() const; // Minimum gap (in columns) always kept between obstacles
+    void SuspendToShell(); // Ctrl+Z: hand the terminal back, stop, then resume
     void Cleanup();
 
     // Screen size (obtained from the terminal at runtime)
