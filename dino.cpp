@@ -6,8 +6,9 @@
 #include <string>
 #include <cstdlib>
 #include <ctime>
+#include <cerrno>       // for errno on a failed read()
 #include <csignal>
-#include <unistd.h>     // for usleep
+#include <unistd.h>     // for usleep and read
 #include <sys/select.h> // for key input detection
 #include <sys/ioctl.h>  // for getting the terminal size
 #include <termios.h>    // for terminal settings
@@ -28,24 +29,23 @@ const std::string CACTUS_AA[] = {
     "  |  "
 };
 
-// Default screen size (fallback used when the terminal size cannot be obtained)
-static const int DEFAULT_WIDTH = 80;
-static const int DEFAULT_HEIGHT = 24;
-
 // Flag to make sure terminal settings are restored even on SIGINT (Ctrl+C) etc.
 static volatile sig_atomic_t g_interrupted = 0;
 
 // --- Function to make keyboard input non-blocking (immediately detectable) on Linux ---
-void SetTerminalMode(bool raw) {
-    static struct termios oldt, newt;
+bool SetTerminalMode(bool raw) {
+    static struct termios oldt;
+    static bool saved = false; // Guards against restoring settings we never saved
     if (raw) {
-        tcgetattr(STDIN_FILENO, &oldt); // Save the current settings
-        newt = oldt;
+        if (tcgetattr(STDIN_FILENO, &oldt) != 0) return false; // Save the current settings
+        struct termios newt = oldt;
         newt.c_lflag &= ~(ICANON | ECHO); // No Enter required; hide typed characters
-        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-    } else {
-        tcsetattr(STDIN_FILENO, TCSANOW, &oldt); // Restore the original settings
+        if (tcsetattr(STDIN_FILENO, TCSANOW, &newt) != 0) return false;
+        saved = true;
+        return true;
     }
+    if (!saved) return false;
+    return tcsetattr(STDIN_FILENO, TCSANOW, &oldt) == 0; // Restore the original settings
 }
 
 // Function equivalent to Windows' _kbhit() (check whether a key has been pressed)
@@ -57,16 +57,42 @@ bool IsKeyPressed() {
     return select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0;
 }
 
-// Get the terminal size. Falls back to the default values on failure.
-void GetTerminalSize(int& width, int& height) {
+// Get the terminal size. Returns false if it cannot be determined, which in
+// practice means stdout is not a terminal.
+bool GetTerminalSize(int& width, int& height) {
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
         width = ws.ws_col;
         height = ws.ws_row;
-    } else {
-        width = DEFAULT_WIDTH;
-        height = DEFAULT_HEIGHT;
+        return true;
     }
+    return false;
+}
+
+// Refuse to run where the game cannot be seen or cannot be drawn correctly.
+// Called before Game is constructed, because the constructor derives ground_y
+// and the play field from the terminal size and has no way to report a problem.
+bool CheckTerminalEnvironment(std::string& error) {
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        error = "dino: must be run in a terminal";
+        return false;
+    }
+
+    int width, height;
+    if (!GetTerminalSize(width, height)) {
+        error = "dino: could not determine the terminal size";
+        return false;
+    }
+
+    if (width < MIN_TERM_WIDTH || height < MIN_TERM_HEIGHT) {
+        error = "dino: terminal too small (" + std::to_string(width) + "x" +
+                std::to_string(height) + "); at least " +
+                std::to_string(MIN_TERM_WIDTH) + "x" +
+                std::to_string(MIN_TERM_HEIGHT) + " is required";
+        return false;
+    }
+
+    return true;
 }
 
 // SIGINT handler: just raises a flag to break out of the loop
@@ -78,8 +104,9 @@ Game::Game() {
     // Initialize the random number generator
     std::srand(static_cast<unsigned int>(std::time(nullptr)));
 
-    // Get the screen size from the terminal
-    int term_w, term_h;
+    // Get the screen size from the terminal. CheckTerminalEnvironment() has
+    // already confirmed this succeeds and that the window is large enough.
+    int term_w = MIN_TERM_WIDTH, term_h = MIN_TERM_HEIGHT;
     GetTerminalSize(term_w, term_h);
     screen_width = term_w;
     screen_height = term_h - 1; // Reserve the bottom row for the score display
@@ -102,14 +129,29 @@ Game::Game() {
     score = 0;
     game_over = false;
     quit = false;
+    input_closed = false;
     frame_delay = 40000; // Initial per-frame wait (40 ms)
 }
 
 // --- 1. Input handling ---
 void Game::HandleInput() {
+    // Once stdin is at EOF, select() reports it readable forever. Stop asking.
+    if (input_closed) return;
+
     // Process all buffered input at once (avoids dropping rapid key presses)
     while (IsKeyPressed()) {
-        char ch = std::cin.get();
+        char ch;
+        ssize_t n = read(STDIN_FILENO, &ch, 1);
+        if (n == 0) { // EOF: stdin is closed, there will never be more input
+            input_closed = true;
+            return;
+        }
+        if (n < 0) {
+            if (errno == EINTR) continue; // Interrupted by a signal; try again
+            input_closed = true;
+            return;
+        }
+
         if ((ch == ' ' || ch == 'w') && is_on_ground) {
             // Jump with space / w (upward initial velocity).
             // Provides enough height and air time to clear a cactus comfortably.
@@ -210,9 +252,12 @@ void Game::CheckCollision() {
 void Game::Render() {
     std::vector<std::string> screen(screen_height, std::string(screen_width, ' '));
 
-    // Draw the ground
-    for (int x = 0; x < screen_width; ++x) {
-        screen[ground_y][x] = '_';
+    // Draw the ground. The bounds check is what keeps a bad ground_y from
+    // writing outside the buffer, whatever geometry it was derived from.
+    if (ground_y >= 0 && ground_y < screen_height) {
+        for (int x = 0; x < screen_width; ++x) {
+            screen[ground_y][x] = '_';
+        }
     }
 
     // Write the dinosaur
@@ -267,7 +312,10 @@ int Game::Run() {
     std::signal(SIGINT, HandleSigint);
 
     // Configure the terminal for the game
-    SetTerminalMode(true);
+    if (!SetTerminalMode(true)) {
+        std::cerr << "dino: could not put the terminal into raw mode\n";
+        return -1;
+    }
 
     // Escape sequence that clears the screen once and hides the cursor
     std::cout << "\033[2J\033[?25l" << std::flush;
