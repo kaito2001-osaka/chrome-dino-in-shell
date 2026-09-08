@@ -45,6 +45,13 @@ make clean
 ./dino
 ```
 
+To replay a specific obstacle layout, pass a seed. Runs with the same seed are
+identical, which is useful when reporting a bug or comparing two attempts:
+
+```sh
+./dino --seed 42
+```
+
 ### Controls
 
 | Key            | Action |
