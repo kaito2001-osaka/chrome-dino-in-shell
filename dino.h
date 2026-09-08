@@ -51,6 +51,9 @@ private:
     void Render();
     void SpawnObstacle();
     int MinGap() const; // Minimum gap (in columns) always kept between obstacles
+    // Re-derive every geometry-dependent value from a terminal size
+    void ApplyTerminalSize(int term_w, int term_h);
+    void RenderTooSmall() const; // Shown while the window is below the minimum
     void SuspendToShell(); // Ctrl+Z: hand the terminal back, stop, then resume
     void Cleanup();
 
@@ -74,6 +77,7 @@ private:
     bool game_over;
     bool quit;          // Whether the user aborted with q
     bool input_closed;  // Whether stdin has reached EOF (nothing more to read)
+    bool paused_too_small; // Whether the window shrank below the minimum size
     int frame_delay;    // Wait time per frame (microseconds); smaller is faster
 };
 

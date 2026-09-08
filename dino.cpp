@@ -35,6 +35,8 @@ static volatile sig_atomic_t g_interrupted = 0;
 // Set by SIGTSTP (Ctrl+Z). Handled at the top of the game loop rather than in
 // the handler itself, because restoring the screen is not async-signal-safe.
 static volatile sig_atomic_t g_suspend_requested = 0;
+// Set by SIGWINCH: the window changed size and the geometry must be re-derived.
+static volatile sig_atomic_t g_resized = 0;
 
 // --- Function to make keyboard input non-blocking (immediately detectable) on Linux ---
 bool SetTerminalMode(bool raw) {
@@ -124,24 +126,28 @@ static void HandleTstp(int) {
     g_suspend_requested = 1;
 }
 
+// SIGWINCH handler: the window was resized. The size is re-read from the loop.
+static void HandleWinch(int) {
+    g_resized = 1;
+}
+
 Game::Game() {
     // Initialize the random number generator
     std::srand(static_cast<unsigned int>(std::time(nullptr)));
+
+    // Initial state of the player (dinosaur). Set before the geometry, because
+    // ApplyTerminalSize() places the dinosaur on the ground it derives.
+    dino_x = 5;
+    dino_y = 0;
+    dino_y_float = 0;
+    y_velocity = 0;
+    is_on_ground = true;
 
     // Get the screen size from the terminal. CheckTerminalEnvironment() has
     // already confirmed this succeeds and that the window is large enough.
     int term_w = MIN_TERM_WIDTH, term_h = MIN_TERM_HEIGHT;
     GetTerminalSize(term_w, term_h);
-    screen_width = term_w;
-    screen_height = term_h - 1; // Reserve the bottom row for the score display
-    ground_y = screen_height - 2;
-
-    // Initial state of the player (dinosaur)
-    dino_x = 5;
-    dino_y = ground_y - DINO_H;
-    dino_y_float = dino_y;
-    y_velocity = 0;
-    is_on_ground = true;
+    ApplyTerminalSize(term_w, term_h);
 
     // Initial obstacle placement. Place only one at the right edge of the screen,
     // and always keep at least the minimum gap before the next one spawns
@@ -154,7 +160,56 @@ Game::Game() {
     game_over = false;
     quit = false;
     input_closed = false;
+    paused_too_small = false;
     frame_delay = 40000; // Initial per-frame wait (40 ms)
+}
+
+// Derive every geometry-dependent value from a terminal size. Called once at
+// construction and again on every SIGWINCH, so the simulation and what is on
+// screen can never disagree about how big the play field is.
+void Game::ApplyTerminalSize(int term_w, int term_h) {
+    screen_width = term_w;
+    screen_height = term_h - 1; // Reserve the bottom row for the score display
+    ground_y = screen_height - 2;
+
+    // Keep the dinosaur inside a field that may have got narrower
+    if (dino_x > screen_width - DINO_W) dino_x = screen_width - DINO_W;
+    if (dino_x < 0) dino_x = 0;
+
+    // Put it back on the ground, which has almost certainly moved. Mid-jump the
+    // arc is left alone unless the new ground is now above the dinosaur.
+    const int rest_y = ground_y - DINO_H;
+    if (is_on_ground || dino_y_float > rest_y) {
+        dino_y_float = rest_y;
+        dino_y = rest_y;
+        is_on_ground = true;
+        y_velocity = 0;
+    }
+
+    // Drop obstacles that a narrower field can no longer hold
+    for (size_t i = obstacles.size(); i-- > 0;) {
+        if (obstacles[i] >= screen_width) {
+            obstacles.erase(obstacles.begin() + static_cast<std::ptrdiff_t>(i));
+        }
+    }
+}
+
+// Shown instead of the play field while the window is below the minimum size.
+// Writes only short, explicitly positioned strings and never indexes the render
+// buffer, so it stays safe all the way down to a 1x1 terminal.
+void Game::RenderTooSmall() const {
+    int width = 0, height = 0;
+    if (!GetTerminalSize(width, height)) return;
+
+    std::string first = "terminal too small";
+    std::string second = "need " + std::to_string(MIN_TERM_WIDTH) + "x" +
+                         std::to_string(MIN_TERM_HEIGHT);
+    if (static_cast<int>(first.size()) > width) first = first.substr(0, width);
+    if (static_cast<int>(second.size()) > width) second = second.substr(0, width);
+
+    std::string output = "\033[2J\033[H" + first;
+    if (height >= 2) output += "\033[2;1H" + second;
+    std::cout << output << std::flush;
 }
 
 // --- 1. Input handling ---
@@ -354,6 +409,7 @@ void Game::SuspendToShell() {
         return;
     }
     EnterGameScreen();
+    g_resized = 1; // The window may have been resized while we were stopped
 }
 
 int Game::Run() {
@@ -362,6 +418,7 @@ int Game::Run() {
     std::signal(SIGTERM, HandleTerminate);  // kill
     std::signal(SIGHUP, HandleTerminate);   // terminal window closed
     std::signal(SIGTSTP, HandleTstp);       // Ctrl+Z
+    std::signal(SIGWINCH, HandleWinch);     // window resized
 
     // Configure the terminal for the game
     if (!SetTerminalMode(true)) {
@@ -379,10 +436,29 @@ int Game::Run() {
             SuspendToShell();
             if (g_interrupted) break;
         }
+
+        if (g_resized) {
+            g_resized = 0;
+            int term_w = 0, term_h = 0;
+            if (GetTerminalSize(term_w, term_h)) {
+                paused_too_small =
+                    (term_w < MIN_TERM_WIDTH || term_h < MIN_TERM_HEIGHT);
+                if (!paused_too_small) ApplyTerminalSize(term_w, term_h);
+                // Erase once so no cell from the old size is left behind. This
+                // is inside the alternate buffer, so the user's screen is safe.
+                std::cout << "\033[2J" << std::flush;
+            }
+        }
+
         HandleInput();
-        Update();
-        CheckCollision();
-        Render();
+        if (paused_too_small) {
+            // Hold the run rather than draw a field that does not fit
+            RenderTooSmall();
+        } else {
+            Update();
+            CheckCollision();
+            Render();
+        }
         usleep(frame_delay);
     }
 
