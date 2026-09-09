@@ -114,10 +114,12 @@ static void LeaveGameScreen() {
     std::cout << "\033[?25h\033[?1049l" << std::flush;
 }
 
-// SIGINT / SIGTERM / SIGHUP handler: raise a flag to break out of the loop, so
-// every one of them leaves through Cleanup() with the terminal restored.
-static void HandleTerminate(int) {
-    g_interrupted = 1;
+// SIGINT / SIGTERM / SIGHUP handler: record which signal arrived and break out
+// of the loop, so every one of them leaves through Cleanup() with the terminal
+// restored. The number is kept so the exit status can follow the 128+N shell
+// convention rather than reporting a plain success.
+static void HandleTerminate(int sig) {
+    g_interrupted = sig;
 }
 
 // SIGTSTP handler: only record the request. The actual suspend happens at the
@@ -155,6 +157,7 @@ Game::Game(unsigned int seed) : rng(seed) {
     quit = false;
     input_closed = false;
     paused_too_small = false;
+    terminal_lost = false;
 
     Reset();
 }
@@ -518,14 +521,14 @@ void Game::SuspendToShell() {
 
     if (!SetTerminalMode(true)) {
         // The terminal is no longer usable; end the run rather than play blind.
-        g_interrupted = 1;
+        terminal_lost = true;
         return;
     }
     EnterGameScreen();
     g_resized = 1; // The window may have been resized while we were stopped
 }
 
-int Game::Run() {
+Game::Result Game::Run() {
     // Catch every signal that would otherwise leave the terminal in raw mode
     std::signal(SIGINT, HandleTerminate);   // Ctrl+C
     std::signal(SIGTERM, HandleTerminate);  // kill
@@ -536,7 +539,11 @@ int Game::Run() {
     // Configure the terminal for the game
     if (!SetTerminalMode(true)) {
         std::cerr << "dino: could not put the terminal into raw mode\n";
-        return -1;
+        Result failed;
+        failed.outcome = Outcome::Failed;
+        failed.score = 0;
+        failed.signal_number = 0;
+        return failed;
     }
 
     // Move to the alternate screen buffer and hide the cursor
@@ -555,7 +562,7 @@ int Game::Run() {
         if (g_suspend_requested) {
             g_suspend_requested = 0;
             SuspendToShell();
-            if (g_interrupted) break;
+            if (terminal_lost) break;
         }
 
         if (g_resized) {
@@ -602,5 +609,21 @@ int Game::Run() {
     // Cleanup: restore the terminal to its original state, clear the screen, and return to the prompt
     Cleanup();
 
-    return static_cast<int>(score);
+    // Work out how the run actually ended. The player quitting from the
+    // game-over panel still counts as a collision - that is what ended their
+    // run - while q pressed mid-run does not.
+    Result result;
+    result.score = score;
+    result.signal_number = 0;
+    if (terminal_lost) {
+        result.outcome = Outcome::Failed;
+    } else if (g_interrupted) {
+        result.outcome = Outcome::Interrupted;
+        result.signal_number = static_cast<int>(g_interrupted);
+    } else if (game_over) {
+        result.outcome = Outcome::Collision;
+    } else {
+        result.outcome = Outcome::Quit;
+    }
+    return result;
 }
