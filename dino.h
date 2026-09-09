@@ -36,6 +36,16 @@ const int GAME_OVER_FREEZE_US = 400000;
 const int MIN_TERM_WIDTH = 40;
 const int MIN_TERM_HEIGHT = 12;
 
+// --- High score persistence ---
+// Stored as a single integer under the XDG data directory:
+//     ${XDG_DATA_HOME:-$HOME/.local/share}/dino/highscore
+// A missing, empty, unreadable or non-numeric file simply means "no high score"
+// -- never an error the player has to deal with.
+long LoadHighScore();
+// Best effort. A directory that cannot be created or written is ignored
+// silently: a high score is not worth interrupting a game for.
+void SaveHighScore(long value);
+
 // --- Terminal control ---
 // Put keyboard input into non-blocking (immediately detectable) mode on Linux.
 // Returns false if the terminal settings could not be read or applied.
@@ -88,6 +98,7 @@ private:
     // Re-derive every geometry-dependent value from a terminal size
     void ApplyTerminalSize(int term_w, int term_h);
     void RenderTooSmall() const; // Shown while the window is below the minimum
+    std::string BuildStatusLine() const; // Fitted to the terminal width
     // Overlay the game-over box on top of the retained final frame
     void DrawGameOverPanel(std::vector<std::string>& screen) const;
     void SuspendToShell(); // Ctrl+Z: hand the terminal back, stop, then resume
@@ -120,7 +131,8 @@ private:
     int spawn_gap; // Remaining distance until the next obstacle
 
     long score;
-    long best_score;   // Best of this session; persisting it is a separate issue
+    long best_score;   // Best ever seen, loaded from and saved to disk
+    bool new_best;     // Whether the run that just ended beat the stored best
     bool game_over;
     int input_freeze;  // Frames left before the game-over panel accepts input
     bool quit;          // Whether the user aborted with q

@@ -3,14 +3,18 @@
 #include "dino.h"
 
 #include <chrono>       // for the frame deadline
+#include <fstream>      // for the high score file
 #include <iostream>
 #include <string>
 #include <thread>       // for sleep_until
 #include <cerrno>       // for errno on a failed read()
 #include <csignal>
+#include <cstdio>       // for rename and remove
+#include <cstdlib>      // for getenv
 #include <unistd.h>     // for read
 #include <sys/select.h> // for key input detection
 #include <sys/ioctl.h>  // for getting the terminal size
+#include <sys/stat.h>   // for mkdir
 #include <termios.h>    // for terminal settings
 
 // Dinosaur ASCII art (facing right). Each row is padded to DINO_W characters.
@@ -28,6 +32,62 @@ const std::string CACTUS_AA[] = {
     "|_|_|",
     "  |  "
 };
+
+// --- High score storage ---------------------------------------------------
+
+// The directory the high score lives in, per the XDG base directory spec.
+// Empty when neither XDG_DATA_HOME nor HOME is set, in which case the score
+// simply is not persisted.
+static std::string HighScoreDirectory() {
+    const char* xdg = std::getenv("XDG_DATA_HOME");
+    if (xdg != nullptr && *xdg != '\0') return std::string(xdg) + "/dino";
+    const char* home = std::getenv("HOME");
+    if (home != nullptr && *home != '\0') return std::string(home) + "/.local/share/dino";
+    return std::string();
+}
+
+// mkdir -p. Every failure is ignored, the usual EEXIST included: the caller
+// finds out whether it worked by trying to write the file.
+static void MakeDirectories(const std::string& path) {
+    for (size_t i = 1; i <= path.size(); ++i) {
+        if (i < path.size() && path[i] != '/') continue;
+        mkdir(path.substr(0, i).c_str(), 0755);
+    }
+}
+
+long LoadHighScore() {
+    const std::string dir = HighScoreDirectory();
+    if (dir.empty()) return 0;
+
+    std::ifstream in((dir + "/highscore").c_str());
+    long value = 0;
+    // Missing, unreadable, empty and non-numeric all mean the same thing here:
+    // there is no high score yet. None of them is worth a message.
+    if (!in || !(in >> value) || value < 0) return 0;
+    return value;
+}
+
+void SaveHighScore(long value) {
+    const std::string dir = HighScoreDirectory();
+    if (dir.empty()) return;
+
+    MakeDirectories(dir); // Created lazily, on the first score worth keeping
+    const std::string path = dir + "/highscore";
+    const std::string temp = path + ".tmp";
+
+    {
+        std::ofstream out(temp.c_str(), std::ios::trunc);
+        if (!out) return;      // Read-only or missing directory: give up quietly
+        out << value << "\n";
+        out.flush();
+        if (!out) { std::remove(temp.c_str()); return; }
+    }
+
+    // Write to a temporary file and rename it into place: rename is atomic
+    // within a filesystem, so an interrupted write cannot leave a half-written
+    // score behind for the next run to read.
+    if (std::rename(temp.c_str(), path.c_str()) != 0) std::remove(temp.c_str());
+}
 
 // Set by SIGINT (Ctrl+C), SIGTERM and SIGHUP: unwind the loop through Cleanup()
 // so the terminal is always restored, whichever of them arrives.
@@ -153,7 +213,8 @@ Game::Game(unsigned int seed) : rng(seed) {
     ApplyTerminalSize(term_w, term_h);
 
     // State that outlives a restart
-    best_score = 0;
+    best_score = LoadHighScore();
+    new_best = false;
     quit = false;
     input_closed = false;
     paused_too_small = false;
@@ -181,6 +242,7 @@ void Game::Reset() {
 
     score = 0;
     game_over = false;
+    new_best = false;
     input_freeze = 0;
     frame_delay = 40000; // Initial per-frame wait (40 ms)
 }
@@ -395,8 +457,10 @@ static void Stamp(std::vector<std::string>& screen, int y, int x,
 void Game::DrawGameOverPanel(std::vector<std::string>& screen) const {
     std::vector<std::string> lines;
     lines.push_back("GAME OVER");
-    lines.push_back("SCORE " + std::to_string(score) +
-                    "    BEST " + std::to_string(best_score));
+    lines.push_back(new_best
+                        ? "SCORE " + std::to_string(score) + "    NEW BEST!"
+                        : "SCORE " + std::to_string(score) +
+                              "    BEST " + std::to_string(best_score));
     lines.push_back("[r] Restart   [q] Quit");
 
     size_t widest = 0;
@@ -424,6 +488,26 @@ void Game::DrawGameOverPanel(std::vector<std::string>& screen) const {
         Stamp(screen, y0 + 1 + i, x0 + 1 + pad, text);
     }
     Stamp(screen, y0 + box_h - 1, x0, border);
+}
+
+// The status line is the widest fixed element on screen, and the high score
+// makes it wider still. Rather than let it overflow a narrow terminal -- which
+// would wrap onto a row that does not exist and scroll the whole frame -- drop
+// the least important part that does not fit.
+std::string Game::BuildStatusLine() const {
+    const std::string score_part = " SCORE: " + std::to_string(score);
+    const std::string hi_part =
+        best_score > 0 ? "   HI: " + std::to_string(best_score) : std::string();
+    const std::string hints = game_over ? "   [r] Restart   [q] Quit "
+                                        : "   [SPACE/w] Jump   [q] Quit ";
+
+    std::string line = score_part + hi_part + hints;
+    if (static_cast<int>(line.size()) > screen_width) line = score_part + hi_part + " ";
+    if (static_cast<int>(line.size()) > screen_width) line = score_part + " ";
+    if (static_cast<int>(line.size()) > screen_width) {
+        line = line.substr(0, static_cast<size_t>(screen_width));
+    }
+    return line;
 }
 
 // --- 4 & 5. Build the draw buffer and flush it to the screen at once ---
@@ -489,9 +573,7 @@ void Game::Render() {
     // A restart takes the score back to 0, and without the erase the old, longer
     // number would leave stale digits behind.
     output += "\033[" + std::to_string(screen_height + 1) + ";1H\033[K";
-    output += "\033[7m SCORE: " + std::to_string(score) +
-              (game_over ? "   [r] Restart   [q] Quit "
-                         : "   [SPACE/w] Jump   [q] Quit ") + "\033[0m";
+    output += "\033[7m" + BuildStatusLine() + "\033[0m";
     std::cout << output << std::flush;
 }
 
@@ -589,7 +671,11 @@ Game::Result Game::Run() {
             Update();
             CheckCollision();
             if (game_over) {
-                if (score > best_score) best_score = score;
+                if (score > best_score) {
+                    best_score = score;
+                    new_best = true;
+                    SaveHighScore(best_score);
+                }
                 input_freeze = GAME_OVER_FREEZE_US / frame_delay;
             }
             Render();
