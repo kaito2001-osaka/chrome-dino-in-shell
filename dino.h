@@ -7,15 +7,43 @@
 #include <string>
 #include <vector>
 
-// Dinosaur ASCII art
-extern const std::string DINO_AA[];
+// Length of an art row, usable in a constant expression so the sprites can be
+// checked against their size constants while compiling.
+constexpr int ArtRowWidth(const char* row) {
+    return *row == '\0' ? 0 : 1 + ArtRowWidth(row + 1);
+}
+
+// Dinosaur ASCII art. Defined here, beside the constants the drawing and
+// collision loops index it with, so the two cannot drift apart: the array bound
+// fixes the row count and the static_asserts below fix every row's width. Both
+// are compile-time, so editing a row to the wrong length is a build error
+// rather than a silent out-of-bounds read.
 const int DINO_W = 7;
 const int DINO_H = 4;
+constexpr const char* DINO_AA[DINO_H] = {
+    "   ___ ",
+    "  /o  |",
+    "_/    |",
+    " |_||_|"
+};
+static_assert(ArtRowWidth(DINO_AA[0]) == DINO_W, "DINO_AA row 0 is not DINO_W wide");
+static_assert(ArtRowWidth(DINO_AA[1]) == DINO_W, "DINO_AA row 1 is not DINO_W wide");
+static_assert(ArtRowWidth(DINO_AA[2]) == DINO_W, "DINO_AA row 2 is not DINO_W wide");
+static_assert(ArtRowWidth(DINO_AA[3]) == DINO_W, "DINO_AA row 3 is not DINO_W wide");
 
-// Cactus ASCII art
-extern const std::string CACTUS_AA[];
+// Cactus (saguaro) ASCII art, under the same guarantees.
 const int CACTUS_W = 5;
 const int CACTUS_H = 4;
+constexpr const char* CACTUS_AA[CACTUS_H] = {
+    "  |  ",
+    "| | |",
+    "|_|_|",
+    "  |  "
+};
+static_assert(ArtRowWidth(CACTUS_AA[0]) == CACTUS_W, "CACTUS_AA row 0 is not CACTUS_W wide");
+static_assert(ArtRowWidth(CACTUS_AA[1]) == CACTUS_W, "CACTUS_AA row 1 is not CACTUS_W wide");
+static_assert(ArtRowWidth(CACTUS_AA[2]) == CACTUS_W, "CACTUS_AA row 2 is not CACTUS_W wide");
+static_assert(ArtRowWidth(CACTUS_AA[3]) == CACTUS_W, "CACTUS_AA row 3 is not CACTUS_W wide");
 
 // Jump shape. The arc is derived from the play field rather than hardcoded, so
 // the dinosaur never leaves the top of a short terminal: it rises just far

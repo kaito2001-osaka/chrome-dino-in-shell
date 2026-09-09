@@ -17,22 +17,6 @@
 #include <sys/stat.h>   // for mkdir
 #include <termios.h>    // for terminal settings
 
-// Dinosaur ASCII art (facing right). Each row is padded to DINO_W characters.
-const std::string DINO_AA[] = {
-    "   ___ ",
-    "  /o  |",
-    "_/    |",
-    " |_||_|"
-};
-
-// Cactus (saguaro) ASCII art. Each row is padded to CACTUS_W characters.
-const std::string CACTUS_AA[] = {
-    "  |  ",
-    "| | |",
-    "|_|_|",
-    "  |  "
-};
-
 // --- High score storage ---------------------------------------------------
 
 // The directory the high score lives in, per the XDG base directory spec.
