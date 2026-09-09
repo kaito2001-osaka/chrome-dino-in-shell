@@ -100,7 +100,7 @@ static volatile sig_atomic_t g_suspend_requested = 0;
 // Set by SIGWINCH: the window changed size and the geometry must be re-derived.
 static volatile sig_atomic_t g_resized = 0;
 
-// --- Function to make keyboard input non-blocking (immediately detectable) on Linux ---
+// --- Function to make keyboard input non-blocking (immediately detectable) ---
 bool SetTerminalMode(bool raw) {
     static struct termios oldt;
     static bool saved = false; // Guards against restoring settings we never saved

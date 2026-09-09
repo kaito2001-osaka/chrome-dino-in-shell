@@ -187,7 +187,8 @@ long LoadHighScore();
 void SaveHighScore(long value);
 
 // --- Terminal control ---
-// Put keyboard input into non-blocking (immediately detectable) mode on Linux.
+// Put keyboard input into non-blocking (immediately detectable) mode. POSIX
+// termios, so this is not Linux-specific.
 // Returns false if the terminal settings could not be read or applied.
 bool SetTerminalMode(bool raw);
 // Equivalent of Windows' _kbhit() (check whether a key has been pressed)
