@@ -7,15 +7,98 @@
 #include <string>
 #include <vector>
 
+// --- Sprites ---------------------------------------------------------------
+// The art itself lives in dino.cpp, beside ValidateArt(), which checks every
+// sprite against the size constants declared here before the game starts.
+
 // Dino ASCII art
 extern const std::string DINO_AA[];
 const int DINO_W = 7;
 const int DINO_H = 4;
 
-// Cactus ASCII art
+// Crouched dinosaur: longer and, crucially, only two rows tall, so it passes
+// under a pterodactyl that a standing dinosaur would walk into.
+extern const std::string DUCK_AA[];
+const int DUCK_W = 8;
+const int DUCK_H = 2;
+
+// --- Obstacles -------------------------------------------------------------
+// Each sits `top_offset` rows above the ground row, so a pterodactyl can fly at
+// a height a standing dinosaur cannot pass and a crouched one can.
+
+extern const std::string CACTUS_SMALL_AA[];
+const int CACTUS_SMALL_W = 3;
+const int CACTUS_SMALL_H = 3;
+
+// Cactus ASCII art. The original saguaro, now the large variant.
 extern const std::string CACTUS_AA[];
 const int CACTUS_W = 5;
 const int CACTUS_H = 4;
+
+// Two and three small cacti drawn as a single obstacle. Deliberately packed
+// with no gap: a wider cluster needs a longer airborne stretch to clear than
+// the jump provides.
+extern const std::string CLUSTER2_AA[];
+const int CLUSTER2_W = 6;
+const int CLUSTER2_H = 3;
+
+extern const std::string CLUSTER3_AA[];
+const int CLUSTER3_W = 9;
+const int CLUSTER3_H = 3;
+
+// Pterodactyl. Flown at PTERO_TOP_OFFSET rows above the ground, which puts it
+// through both the standing dinosaur and the arc of an ordinary jump, so it has
+// to be ducked rather than jumped.
+extern const std::string PTERO_AA[];
+const int PTERO_W = 5;
+const int PTERO_H = 3;
+
+// Which obstacle, and how it is placed and drawn.
+enum class ObstacleKind {
+    CactusSmall,
+    CactusLarge,
+    Cluster2,
+    Cluster3,
+    Pterodactyl,
+};
+
+struct ObstacleArt {
+    const std::string* rows;
+    int width;
+    int height;
+    int top_offset; // Rows between the ground row and the sprite's top row
+};
+
+// Description of one obstacle kind. Defined in dino.cpp.
+const ObstacleArt& ArtFor(ObstacleKind kind);
+
+// The widest obstacle, which is what MinGap() has to leave room for.
+const int WIDEST_OBSTACLE_W = CLUSTER3_W;
+
+// The pterodactyl's height above the ground. Chosen so it cuts through both a
+// standing dinosaur and the arc of an ordinary jump, while a crouched
+// dinosaur - only DUCK_H rows tall - passes underneath.
+const int PTERO_TOP_OFFSET = 6;
+
+// A duck lasts this many frames unless a jump cancels it. Terminals report no
+// key release, so the crouch is held on a timer rather than while a key is
+// down. Long enough to cover an obstacle's whole horizontal overlap window.
+const int DUCK_HOLD_FRAMES = 20;
+
+// Scores at which the harder obstacles start appearing, so the opening of a run
+// stays teachable.
+const long PTERODACTYL_UNLOCK_SCORE = 300;
+const long CLUSTER3_UNLOCK_SCORE = 800;
+
+// Points per column shaved off the random slack between obstacles. This is what
+// keeps difficulty rising after frame_delay bottoms out at 18 ms around 2200
+// points: at 80 columns the slack starts at 26 and reaches zero near 2600, past
+// which every obstacle arrives at exactly MinGap() - the floor the issue asks
+// the curve to stop at, since anything closer is not clearable.
+const long GAP_TIGHTEN_PER_COLUMN = 100;
+
+// Length of a day and of a night, in points.
+const long DAY_LENGTH = 700;
 
 // Jump shape. The arc is derived from the play field rather than hardcoded, so
 // the dinosaur never leaves the top of a short terminal: it rises just far
@@ -95,6 +178,13 @@ private:
     void Render();
     void Reset();       // Start a fresh run without re-entering raw mode
     void SpawnObstacle();
+    ObstacleKind PickObstacleKind(); // Weighted by what the score has unlocked
+    bool IsNight() const;            // Whether the palette is currently inverted
+    // The dinosaur's current sprite and box, which depend on whether it ducks
+    const std::string* DinoArt() const;
+    int DinoWidth() const;
+    int DinoHeight() const;
+    int DinoTop() const;
     int MinGap() const; // Minimum gap (in columns) always kept between obstacles
     int RandomGap();    // MinGap() plus a random extra, in columns
     // Re-derive every geometry-dependent value from a terminal size
@@ -119,6 +209,8 @@ private:
     double jump_velocity; // Upward velocity of a jump, derived from the field
     double gravity;       // Downward acceleration per frame, likewise derived
     bool is_on_ground;
+    int duck_frames;      // Frames of crouch left; 0 means standing
+    int escape_state;     // Progress through an "ESC [ X" arrow-key sequence
 
     std::mt19937 rng; // Obstacle spacing; seeded per run, or from --seed
 
@@ -128,8 +220,12 @@ private:
     std::vector<std::string> screen_buffer;
     std::string output_buffer;
 
-    // List of obstacle (cactus) x coordinates
-    std::vector<int> obstacles;
+    // One obstacle on the field: where it is, and which kind it is
+    struct Obstacle {
+        int x;
+        ObstacleKind kind;
+    };
+    std::vector<Obstacle> obstacles;
     int spawn_gap; // Remaining distance until the next obstacle
 
     long score;
