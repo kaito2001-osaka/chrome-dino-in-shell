@@ -93,6 +93,12 @@ private:
 
     std::mt19937 rng; // Obstacle spacing; seeded per run, or from --seed
 
+    // Render scratch, kept across frames. Rebuilding these every tick cost
+    // roughly screen_width * screen_height bytes of allocation per frame, which
+    // grew with the terminal area and slowed the game down on big terminals.
+    std::vector<std::string> screen_buffer;
+    std::string output_buffer;
+
     // List of obstacle (cactus) x coordinates
     std::vector<int> obstacles;
     int spawn_gap; // Remaining distance until the next obstacle

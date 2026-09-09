@@ -2,11 +2,13 @@
 
 #include "dino.h"
 
+#include <chrono>       // for the frame deadline
 #include <iostream>
 #include <string>
+#include <thread>       // for sleep_until
 #include <cerrno>       // for errno on a failed read()
 #include <csignal>
-#include <unistd.h>     // for usleep and read
+#include <unistd.h>     // for read
 #include <sys/select.h> // for key input detection
 #include <sys/ioctl.h>  // for getting the terminal size
 #include <termios.h>    // for terminal settings
@@ -423,7 +425,16 @@ void Game::DrawGameOverPanel(std::vector<std::string>& screen) const {
 
 // --- 4 & 5. Build the draw buffer and flush it to the screen at once ---
 void Game::Render() {
-    std::vector<std::string> screen(screen_height, std::string(screen_width, ' '));
+    // Reuse the buffer across frames rather than allocating a fresh one every
+    // tick; only the contents are reset. resize() keeps the rows that already
+    // exist, and assign() reuses each row's capacity.
+    if (static_cast<int>(screen_buffer.size()) != screen_height) {
+        screen_buffer.resize(screen_height);
+    }
+    for (int y = 0; y < screen_height; ++y) {
+        screen_buffer[y].assign(static_cast<size_t>(screen_width), ' ');
+    }
+    std::vector<std::string>& screen = screen_buffer;
 
     // Draw the ground. The bounds check is what keeps a bad ground_y from
     // writing outside the buffer, whatever geometry it was derived from.
@@ -464,7 +475,9 @@ void Game::Render() {
     if (game_over) DrawGameOverPanel(screen);
 
     // \033[H is the escape sequence that moves the cursor to the top-left (0,0) (prevents flicker)
-    std::string output = "\033[H";
+    std::string& output = output_buffer;
+    output.clear(); // Keeps the capacity from the previous frame
+    output += "\033[H";
     for (int y = 0; y < screen_height; ++y) {
         output += screen[y];
         if (y < screen_height - 1) output += "\n";
@@ -531,7 +544,14 @@ int Game::Run() {
 
     // Game loop. A collision no longer ends it: the run stops on the game-over
     // panel, which offers a restart, and only q or a signal leaves.
+    //
+    // Frames are paced to a deadline rather than by sleeping a fixed amount
+    // after the work: a fixed sleep makes the real frame time delay + work, so
+    // the game ran slower the larger the terminal was, and slower again on a
+    // busy machine or over a slow link.
+    auto next_frame = std::chrono::steady_clock::now();
     while (!quit && !g_interrupted) {
+        next_frame += std::chrono::microseconds(frame_delay);
         if (g_suspend_requested) {
             g_suspend_requested = 0;
             SuspendToShell();
@@ -567,7 +587,16 @@ int Game::Run() {
             }
             Render();
         }
-        usleep(frame_delay);
+
+        // If the frame overran its budget -- a slow terminal, or the process
+        // was stopped with Ctrl+Z and has just resumed -- drop the frames that
+        // were missed instead of replaying them all at once.
+        const auto now = std::chrono::steady_clock::now();
+        if (next_frame < now) {
+            next_frame = now;
+        } else {
+            std::this_thread::sleep_until(next_frame);
+        }
     }
 
     // Cleanup: restore the terminal to its original state, clear the screen, and return to the prompt
