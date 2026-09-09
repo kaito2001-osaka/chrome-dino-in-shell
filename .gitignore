@@ -39,6 +39,10 @@
 *.out
 *.app
 
+# Build output (Makefile TARGET). Anchored to the repository root so a source
+# file named `dino` elsewhere would still be tracked.
+/dino
+
 # Build directories
 build/
 Build/
@@ -60,5 +64,8 @@ vcpkg_installed/
 Testing/
 .cache/
 
-# Hidden files
+# Hidden editor/tool directories
 .*/
+# ...but not .github/, or a workflow added later would be untracked and would
+# simply never run, with nothing to explain why.
+!.github/
