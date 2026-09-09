@@ -54,11 +54,27 @@ bool CheckTerminalEnvironment(std::string& error);
 // --- Game core ---
 class Game {
 public:
+    // How a run ended. The game already tracked these separately; without them
+    // in the return value main() could not tell a deliberate quit from a death.
+    enum class Outcome {
+        Collision,   // The last run ended on a cactus
+        Quit,        // The player pressed q while still running
+        Interrupted, // SIGINT, SIGTERM or SIGHUP ended the run
+        Failed,      // The terminal could not be configured; nothing was played
+    };
+
+    struct Result {
+        Outcome outcome;
+        long score;        // The full score, not truncated to int
+        int signal_number; // Signal that ended the run (Interrupted only), else 0
+    };
+
     Game();                           // Layout seeded unpredictably
     explicit Game(unsigned int seed); // Layout reproducible from a seed
 
-    // Run the game (init, loop, and cleanup). Returns the final score.
-    int Run();
+    // Run the game (init, loop, and cleanup). Reports how the run ended
+    // alongside the score, so the caller can word the result correctly.
+    Result Run();
 
 private:
     void HandleInput();
@@ -110,6 +126,7 @@ private:
     bool quit;          // Whether the user aborted with q
     bool input_closed;  // Whether stdin has reached EOF (nothing more to read)
     bool paused_too_small; // Whether the window shrank below the minimum size
+    bool terminal_lost;    // Raw mode could not be restored after a Ctrl+Z
     int frame_delay;    // Wait time per frame (microseconds); smaller is faster
 };
 

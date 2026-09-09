@@ -49,12 +49,28 @@ int main(int argc, char* argv[]) {
     }
 
     Game game = has_seed ? Game(static_cast<unsigned int>(seed)) : Game();
-    int score = game.Run();
-    if (score < 0) return 1; // The game could not start; it already said why
+    const Game::Result result = game.Run();
 
-    // The collision itself is now shown in-game on the game-over panel, so this
-    // is just a parting summary. Neutral wording, because reaching here means
-    // the player chose to quit. (Reporting the outcome properly is issue #12.)
-    std::cout << "Final score: " << score << std::endl;
+    // The wording follows how the run actually ended: only a collision is a
+    // game over. Walking away with q is not, and neither is a signal.
+    switch (result.outcome) {
+        case Game::Outcome::Failed:
+            return 1; // Run() has already explained itself on stderr
+
+        case Game::Outcome::Collision:
+            std::cout << "Game Over!  Final score: " << result.score << std::endl;
+            return 0;
+
+        case Game::Outcome::Quit:
+            std::cout << "Score: " << result.score << std::endl;
+            return 0;
+
+        case Game::Outcome::Interrupted:
+            std::cout << "Interrupted.  Score: " << result.score << std::endl;
+            // 128 + N is what a shell reports for a signalled process, so a
+            // script can tell an interrupted run from a finished one.
+            return 128 + result.signal_number;
+    }
+
     return 0;
 }
