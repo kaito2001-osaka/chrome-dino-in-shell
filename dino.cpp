@@ -17,6 +17,24 @@
 #include <sys/stat.h>   // for mkdir
 #include <termios.h>    // for terminal settings
 
+// Size and placement of each obstacle kind, kept in one place so drawing and
+// collision cannot disagree about them.
+const ObstacleArt& ArtFor(ObstacleKind kind) {
+    static const ObstacleArt kSmall   = {CACTUS_SMALL_AA, CACTUS_SMALL_W, CACTUS_SMALL_H, CACTUS_SMALL_H};
+    static const ObstacleArt kLarge   = {CACTUS_AA,       CACTUS_W,       CACTUS_H,       CACTUS_H};
+    static const ObstacleArt kCluster2 = {CLUSTER2_AA,    CLUSTER2_W,     CLUSTER2_H,     CLUSTER2_H};
+    static const ObstacleArt kCluster3 = {CLUSTER3_AA,    CLUSTER3_W,     CLUSTER3_H,     CLUSTER3_H};
+    static const ObstacleArt kPtero   = {PTERO_AA,        PTERO_W,        PTERO_H,        PTERO_TOP_OFFSET};
+    switch (kind) {
+        case ObstacleKind::CactusSmall: return kSmall;
+        case ObstacleKind::Cluster2:    return kCluster2;
+        case ObstacleKind::Cluster3:    return kCluster3;
+        case ObstacleKind::Pterodactyl: return kPtero;
+        case ObstacleKind::CactusLarge: break;
+    }
+    return kLarge;
+}
+
 // --- High score storage ---------------------------------------------------
 
 // The directory the high score lives in, per the XDG base directory spec.
@@ -211,24 +229,33 @@ Game::Game(unsigned int seed) : rng(seed) {
 // number generator alone, so restarting keeps its seed and never has to tear
 // down and re-enter raw mode.
 void Game::Reset() {
-    dino_x = 5;
-    dino_y = ground_y - DINO_H;
-    dino_y_float = dino_y;
-    y_velocity = 0;
-    is_on_ground = true;
-
-    // Initial obstacle placement. Place only one at the right edge of the screen,
-    // and always keep at least the minimum gap before the next one spawns
-    // (do not set spawn_gap to 0). The gap is randomized per run and per spawn.
-    obstacles.clear();
-    obstacles.push_back(screen_width - 1);
-    spawn_gap = RandomGap();
-
+    // The score is zeroed first, and deliberately so: both the obstacle mix
+    // (PickObstacleKind) and the spacing (RandomGap) are chosen from it, so
+    // spawning the opening obstacle before this point would pick from the
+    // previous run's score - or, on the very first run, from an uninitialised
+    // one, which is undefined behaviour and did send a pterodactyl out at
+    // score 31 in testing.
     score = 0;
     game_over = false;
     new_best = false;
     input_freeze = 0;
     frame_delay = 40000; // Initial per-frame wait (40 ms)
+
+    dino_x = 5;
+    dino_y = ground_y - DINO_H;
+    dino_y_float = dino_y;
+    y_velocity = 0;
+    is_on_ground = true;
+    duck_frames = 0;
+    escape_state = 0;
+
+    // Initial obstacle placement. Place only one at the right edge of the
+    // screen, and always keep at least the minimum gap before the next one
+    // spawns (do not set spawn_gap to 0). The gap and the kind are randomized
+    // per run and per spawn.
+    obstacles.clear();
+    SpawnObstacle();
+    obstacles.front().x = screen_width - 1;
 }
 
 // Derive every geometry-dependent value from a terminal size. Called once at
@@ -239,8 +266,10 @@ void Game::ApplyTerminalSize(int term_w, int term_h) {
     screen_height = term_h - 1; // Reserve the bottom row for the score display
     ground_y = screen_height - 2;
 
-    // Keep the dinosaur inside a field that may have got narrower
-    if (dino_x > screen_width - DINO_W) dino_x = screen_width - DINO_W;
+    // Keep the dinosaur inside a field that may have got narrower. DUCK_W is
+    // the wider of the two sprites, so clamp against that.
+    const int widest_dino = DUCK_W > DINO_W ? DUCK_W : DINO_W;
+    if (dino_x > screen_width - widest_dino) dino_x = screen_width - widest_dino;
     if (dino_x < 0) dino_x = 0;
 
     // Put it back on the ground, which has almost certainly moved. Mid-jump the
@@ -267,7 +296,7 @@ void Game::ApplyTerminalSize(int term_w, int term_h) {
 
     // Drop obstacles that a narrower field can no longer hold
     for (size_t i = obstacles.size(); i-- > 0;) {
-        if (obstacles[i] >= screen_width) {
+        if (obstacles[i].x >= screen_width) {
             obstacles.erase(obstacles.begin() + static_cast<std::ptrdiff_t>(i));
         }
     }
@@ -291,6 +320,27 @@ void Game::RenderTooSmall() const {
     std::cout << output << std::flush;
 }
 
+// The dinosaur is only ever crouched while it is on the ground: a jump cancels
+// the duck, so it cannot be used to shrink the hitbox mid-air.
+const char* const* Game::DinoArt() const {
+    return (duck_frames > 0 && is_on_ground) ? DUCK_AA : DINO_AA;
+}
+int Game::DinoWidth() const {
+    return (duck_frames > 0 && is_on_ground) ? DUCK_W : DINO_W;
+}
+int Game::DinoHeight() const {
+    return (duck_frames > 0 && is_on_ground) ? DUCK_H : DINO_H;
+}
+int Game::DinoTop() const {
+    // Crouched, the dinosaur always sits on the ground; standing, it follows
+    // the jump arc.
+    return (duck_frames > 0 && is_on_ground) ? (ground_y - DUCK_H) : dino_y;
+}
+
+bool Game::IsNight() const {
+    return (score / DAY_LENGTH) % 2 == 1;
+}
+
 // --- 1. Input handling ---
 void Game::HandleInput() {
     // Once stdin is at EOF, select() reports it readable forever. Stop asking.
@@ -310,6 +360,17 @@ void Game::HandleInput() {
             return;
         }
 
+        // Arrow keys arrive as the three bytes ESC [ A, so the loop cannot
+        // treat each byte on its own: a bare '[' or 'A' is not a key press.
+        if (escape_state == 0 && ch == '\033') { escape_state = 1; continue; }
+        if (escape_state == 1) { escape_state = (ch == '[') ? 2 : 0; continue; }
+        if (escape_state == 2) {
+            escape_state = 0;
+            if (ch == 'A') ch = 'w';      // up    -> jump
+            else if (ch == 'B') ch = 's'; // down  -> duck
+            else continue;                // left/right and the rest: ignore
+        }
+
         if (game_over) {
             // Keys pressed in the moments around the collision are read and
             // thrown away, so a jump buffered just before impact cannot dismiss
@@ -324,10 +385,15 @@ void Game::HandleInput() {
         }
 
         if ((ch == ' ' || ch == 'w') && is_on_ground) {
-            // Jump with space / w. The velocity was derived from the play field
-            // in ApplyTerminalSize(), so the arc fits whatever terminal this is.
+            // Jump with space / w / up. The velocity was derived from the play
+            // field in ApplyTerminalSize(), so the arc fits this terminal.
             y_velocity = jump_velocity;
             is_on_ground = false;
+            duck_frames = 0; // A jump cancels a crouch
+        } else if (ch == 's') {
+            // Duck with s / down. Held on a timer, since a terminal reports no
+            // key release; pressing again simply re-arms it.
+            if (is_on_ground) duck_frames = DUCK_HOLD_FRAMES;
         } else if (ch == 'q') {
             quit = true;
         }
@@ -339,7 +405,9 @@ void Game::HandleInput() {
 // dinosaur and cactus, the player can land after clearing one obstacle and
 // have room to prepare for the next.
 int Game::MinGap() const {
-    return DINO_W + CACTUS_W + 16;
+    // Room for the widest obstacle, not just a single cactus, so even a
+    // three-cactus cluster is still clearable at the tightest spacing.
+    return DINO_W + WIDEST_OBSTACLE_W + 16;
 }
 
 // The gap to the next obstacle: the minimum plus a random extra amount. Since
@@ -347,13 +415,35 @@ int Game::MinGap() const {
 // MinGap(), which prevents obstacles from being placed too close together.
 // uniform_int_distribution rather than rand() % n, which is biased.
 int Game::RandomGap() {
-    std::uniform_int_distribution<int> extra(0, screen_width / 3);
+    // The random slack above the minimum shrinks as the score rises, so
+    // obstacles keep arriving closer together after frame_delay has bottomed
+    // out at 18 ms and stopped contributing any difficulty of its own.
+    int slack = screen_width / 3 -
+                static_cast<int>(score / GAP_TIGHTEN_PER_COLUMN);
+    if (slack < 0) slack = 0; // MinGap() is the floor: never closer than this
+    std::uniform_int_distribution<int> extra(0, slack);
     return MinGap() + extra(rng);
+}
+
+// Which obstacle to send next. Pterodactyls and three-cactus clusters are held
+// back until the player has had time to learn the basic jump.
+ObstacleKind Game::PickObstacleKind() {
+    std::uniform_int_distribution<int> roll(0, 99);
+    const int r = roll(rng);
+
+    if (score >= PTERODACTYL_UNLOCK_SCORE && r < 25) return ObstacleKind::Pterodactyl;
+    if (r < 45) return ObstacleKind::CactusSmall;
+    if (r < 70) return ObstacleKind::CactusLarge;
+    if (score >= CLUSTER3_UNLOCK_SCORE && r < 85) return ObstacleKind::Cluster3;
+    return ObstacleKind::Cluster2;
 }
 
 // Spawn a new obstacle at the right edge of the screen
 void Game::SpawnObstacle() {
-    obstacles.push_back(screen_width - 1);
+    Obstacle obstacle;
+    obstacle.x = screen_width - 1;
+    obstacle.kind = PickObstacleKind();
+    obstacles.push_back(obstacle);
     spawn_gap = RandomGap();
 }
 
@@ -373,11 +463,15 @@ void Game::Update() {
         }
     }
 
+    // The crouch is on a timer, because a terminal never reports a key release
+    if (duck_frames > 0) --duck_frames;
+
     // Move obstacles to the left. Remove any that have gone off-screen.
     for (size_t i = 0; i < obstacles.size(); ++i) {
-        obstacles[i] -= 1;
+        obstacles[i].x -= 1;
     }
-    if (!obstacles.empty() && obstacles.front() < -CACTUS_W) {
+    if (!obstacles.empty() &&
+        obstacles.front().x < -ArtFor(obstacles.front().kind).width) {
         obstacles.erase(obstacles.begin());
     }
 
@@ -397,26 +491,30 @@ void Game::Update() {
 // Rather than using bounding boxes, a collision is only registered when the
 // actually-drawn cells of the dinosaur and the cactus overlap (pixel-level check).
 void Game::CheckCollision() {
-    int cactus_y = ground_y - CACTUS_H;
+    const char* const* dino_art = DinoArt();
+    const int dino_w = DinoWidth();
+    const int dino_h = DinoHeight();
+    const int dino_top = DinoTop();
+
     for (size_t i = 0; i < obstacles.size(); ++i) {
-        int cx = obstacles[i];
+        const ObstacleArt& art = ArtFor(obstacles[i].kind);
+        const int ox = obstacles[i].x;
+        const int oy = ground_y - art.top_offset;
 
         // First, skip if the rough bounding boxes do not overlap
-        if (dino_x >= cx + CACTUS_W || dino_x + DINO_W <= cx) continue;
+        if (dino_x >= ox + art.width || dino_x + dino_w <= ox) continue;
 
-        // For each dinosaur cell, check whether a cactus cell exists at the same screen coordinate
-        for (int dh = 0; dh < DINO_H; ++dh) {
-            for (int dw = 0; dw < DINO_W; ++dw) {
-                if (DINO_AA[dh][dw] == ' ') continue;
+        // Then compare the actually-drawn cells, so a gap in the art is a gap
+        for (int dh = 0; dh < dino_h; ++dh) {
+            for (int dw = 0; dw < dino_w; ++dw) {
+                if (dino_art[dh][dw] == ' ') continue;
 
-                int sx = dino_x + dw; // x on screen
-                int sy = dino_y + dh; // y on screen
+                const int col = (dino_x + dw) - ox;   // Column within the obstacle
+                const int row = (dino_top + dh) - oy; // Row within the obstacle
+                if (col < 0 || col >= art.width) continue;
+                if (row < 0 || row >= art.height) continue;
 
-                int cw = sx - cx;        // Column within the cactus art
-                int chh = sy - cactus_y; // Row within the cactus art
-                if (cw < 0 || cw >= CACTUS_W || chh < 0 || chh >= CACTUS_H) continue;
-
-                if (CACTUS_AA[chh][cw] != ' ') {
+                if (art.rows[row][col] != ' ') {
                     game_over = true;
                     return;
                 }
@@ -483,7 +581,7 @@ std::string Game::BuildStatusLine() const {
     const std::string hi_part =
         best_score > 0 ? "   HI: " + std::to_string(best_score) : std::string();
     const std::string hints = game_over ? "   [r] Restart   [q] Quit "
-                                        : "   [SPACE/w] Jump   [q] Quit ";
+                                        : "   [SPACE] Jump   [s] Duck   [q] Quit ";
 
     std::string line = score_part + hi_part + hints;
     if (static_cast<int>(line.size()) > screen_width) line = score_part + hi_part + " ";
@@ -515,28 +613,32 @@ void Game::Render() {
         }
     }
 
-    // Write the dinosaur
-    for (int h = 0; h < DINO_H; ++h) {
-        for (int w = 0; w < DINO_W; ++w) {
-            int py = dino_y + h;
+    // Write the dinosaur, standing or crouched
+    const char* const* dino_art = DinoArt();
+    const int dino_h = DinoHeight();
+    const int dino_w = DinoWidth();
+    const int dino_top = DinoTop();
+    for (int h = 0; h < dino_h; ++h) {
+        for (int w = 0; w < dino_w; ++w) {
+            int py = dino_top + h;
             int px = dino_x + w;
             if (py >= 0 && py < screen_height && px >= 0 && px < screen_width) {
-                char c = DINO_AA[h][w];
+                char c = dino_art[h][w];
                 if (c != ' ') screen[py][px] = c;
             }
         }
     }
 
-    // Write the cacti
-    int cactus_y = ground_y - CACTUS_H;
+    // Write the obstacles, each at its own height above the ground
     for (size_t i = 0; i < obstacles.size(); ++i) {
-        int cactus_x = obstacles[i];
-        for (int h = 0; h < CACTUS_H; ++h) {
-            for (int w = 0; w < CACTUS_W; ++w) {
-                int px = cactus_x + w;
-                int py = cactus_y + h;
+        const ObstacleArt& art = ArtFor(obstacles[i].kind);
+        const int oy = ground_y - art.top_offset;
+        for (int h = 0; h < art.height; ++h) {
+            for (int w = 0; w < art.width; ++w) {
+                int px = obstacles[i].x + w;
+                int py = oy + h;
                 if (px >= 0 && px < screen_width && py >= 0 && py < screen_height) {
-                    char c = CACTUS_AA[h][w];
+                    char c = art.rows[h][w];
                     if (c != ' ') screen[py][px] = c;
                 }
             }
@@ -549,10 +651,14 @@ void Game::Render() {
     std::string& output = output_buffer;
     output.clear(); // Keeps the capacity from the previous frame
     output += "\033[H";
+    // Night is the whole field in reverse video, the way the original marks
+    // progress through a long run.
+    if (IsNight()) output += "\033[7m";
     for (int y = 0; y < screen_height; ++y) {
         output += screen[y];
         if (y < screen_height - 1) output += "\n";
     }
+    output += "\033[0m"; // End the field's attributes before the status line
     // Put the status line on the reserved bottom row explicitly and clear it.
     // A restart takes the score back to 0, and without the erase the old, longer
     // number would leave stale digits behind.
