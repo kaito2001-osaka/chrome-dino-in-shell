@@ -48,6 +48,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    if(!ValidateArt()) return 1; //if defined art doesn't match sprites dimensions, return 1;
     Game game = has_seed ? Game(static_cast<unsigned int>(seed)) : Game();
     int score = game.Run();
     if (score < 0) return 1; // The game could not start; it already said why
