@@ -8,10 +8,12 @@
 #include <vector>
 
 // Dino ASCII art
+extern const std::string DINO_AA[];
 const int DINO_W = 7;
 const int DINO_H = 4;
 
 // Cactus ASCII art
+extern const std::string CACTUS_AA[];
 const int CACTUS_W = 5;
 const int CACTUS_H = 4;
 
