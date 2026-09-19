@@ -143,8 +143,13 @@ bool GetTerminalSize(int& width, int& height);
 // the window is at least MIN_TERM_WIDTH x MIN_TERM_HEIGHT. On failure, fills
 // `error` with a message for the user and returns false. Must be called before
 // constructing Game, which derives its geometry from the terminal size.
-bool CheckTerminalEnvironment(std::string &error);
+bool CheckTerminalEnvironment(std::string& error);
 
+// Check that the sprite art still matches the size constants above: the right
+// number of rows, and every row exactly the declared width. On failure, explains
+// which row is wrong and returns false. Must be called before constructing Game,
+// whose rendering and collision code indexes the art up to those constants
+// without bounds checks.
 bool ValidateArt();
 
 // --- Game core ---
