@@ -99,6 +99,36 @@ bool CheckTerminalEnvironment(std::string& error) {
     return true;
 }
 
+// Game will not run if the arts dimensions do not match the defined
+// dimensions in dino.h
+bool ValidateArt() {
+  size_t dino_rows = sizeof(DINO_AA) / sizeof(DINO_AA[0]);
+  size_t cactus_rows = sizeof(CACTUS_AA) / sizeof(CACTUS_AA[0]);
+  if (dino_rows != DINO_H) {
+    std::cerr << "dino art height does not match DINO_H.\n";
+    return false;
+  }
+  for (int i = 0; i < DINO_H; ++i) {
+    if (DINO_AA[i].length() != DINO_W) {
+      std::cerr << "dino art width does not match DINO_W.\n";
+      return false;
+    }
+  }
+
+  if (cactus_rows != CACTUS_H) {
+    std::cerr << "cactus art height does not match CACTUS_H.\n";
+    return false;
+  }
+  for (int i = 0; i < CACTUS_H; ++i) {
+    if (CACTUS_AA[i].length() != CACTUS_W) {
+      std::cerr << "cactus art width does not match CACTUS_W.\n";
+      return false;
+    }
+  }
+  
+  return true;
+}
+
 // Switch to the alternate screen buffer (what vim, less and htop use) and hide
 // the cursor. The terminal keeps the user's previous screen and restores it on
 // the way out, so nothing they were looking at is destroyed.

@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-// Dinosaur ASCII art
+// Dino ASCII art
 extern const std::string DINO_AA[];
 const int DINO_W = 7;
 const int DINO_H = 4;
@@ -49,7 +49,9 @@ bool GetTerminalSize(int& width, int& height);
 // the window is at least MIN_TERM_WIDTH x MIN_TERM_HEIGHT. On failure, fills
 // `error` with a message for the user and returns false. Must be called before
 // constructing Game, which derives its geometry from the terminal size.
-bool CheckTerminalEnvironment(std::string& error);
+bool CheckTerminalEnvironment(std::string &error);
+
+bool ValidateArt();
 
 // --- Game core ---
 class Game {
