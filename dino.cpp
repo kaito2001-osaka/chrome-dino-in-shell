@@ -161,34 +161,36 @@ bool CheckTerminalEnvironment(std::string& error) {
     return true;
 }
 
-// Game will not run if the arts dimensions do not match the defined
-// dimensions in dino.h
-bool ValidateArt() {
-  size_t dino_rows = sizeof(DINO_AA) / sizeof(DINO_AA[0]);
-  size_t cactus_rows = sizeof(CACTUS_AA) / sizeof(CACTUS_AA[0]);
-  if (dino_rows != DINO_H) {
-    std::cerr << "dino art height does not match DINO_H.\n";
-    return false;
-  }
-  for (int i = 0; i < DINO_H; ++i) {
-    if (DINO_AA[i].length() != DINO_W) {
-      std::cerr << "dino art width does not match DINO_W.\n";
-      return false;
+// Check one sprite: `rows` entries, each exactly `width` characters. Reports the
+// offending row and what it measured, so a mis-edited sprite is quick to fix.
+static bool ValidateSprite(const char* name, const std::string* art, size_t rows,
+                           int expected_rows, int expected_width) {
+    if (rows != static_cast<size_t>(expected_rows)) {
+        std::cerr << "dino: " << name << " art is " << rows << " rows, expected "
+                  << expected_rows << "\n";
+        return false;
     }
-  }
+    for (int i = 0; i < expected_rows; ++i) {
+        if (art[i].length() != static_cast<size_t>(expected_width)) {
+            std::cerr << "dino: " << name << " art row " << i << " is "
+                      << art[i].length() << " characters, expected "
+                      << expected_width << "\n";
+            return false;
+        }
+    }
+    return true;
+}
 
-  if (cactus_rows != CACTUS_H) {
-    std::cerr << "cactus art height does not match CACTUS_H.\n";
-    return false;
-  }
-  for (int i = 0; i < CACTUS_H; ++i) {
-    if (CACTUS_AA[i].length() != CACTUS_W) {
-      std::cerr << "cactus art width does not match CACTUS_W.\n";
-      return false;
-    }
-  }
-  
-  return true;
+// The game indexes the art up to DINO_W/DINO_H and CACTUS_W/CACTUS_H without
+// bounds checks, so refuse to start when the art no longer matches them. The
+// sizeof below only works here, after the definitions above: dino.h declares
+// the arrays with an incomplete type.
+bool ValidateArt() {
+    return ValidateSprite("dinosaur", DINO_AA, sizeof(DINO_AA) / sizeof(DINO_AA[0]),
+                          DINO_H, DINO_W) &&
+           ValidateSprite("cactus", CACTUS_AA,
+                          sizeof(CACTUS_AA) / sizeof(CACTUS_AA[0]),
+                          CACTUS_H, CACTUS_W);
 }
 
 // Switch to the alternate screen buffer (what vim, less and htop use) and hide
